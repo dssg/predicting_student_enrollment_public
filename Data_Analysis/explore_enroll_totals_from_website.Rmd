@@ -1,0 +1,82 @@
+Exploratory Data Analysis of Aggregate Enrollments
+========================================================
+
+Andrew Landgraf
+
+First, pull in the data created by Zhou, which was downloaded from [here](http://www.cps.edu/SchoolData/Pages/SchoolData.aspx). Also, look at the structure of the data.
+
+```{r}
+# setwd("~/../github/predicting_student_enrollment/")
+load("enrollment_all_data.Rdata")
+# load("enrollment_data.Rdata")
+str(output)
+head(output[,,1])
+```
+
+Transform the data into a data frame, with one row per school and year.
+
+```{r}
+library(plyr)
+options(stringsAsFactors = FALSE)
+dat=adply(output, 3, rbind.fill)
+str(dat)
+```
+
+Edit the variables types and add a `Year` variable.
+
+```{r}
+dat$Year = as.numeric(dat$X1) + 2005
+dat$School_ID = as.numeric(dat$School_ID)
+# dat$School_Name = as.factor(dat$School_Name)
+dat$School_Type = as.factor(dat$School_Type)
+
+for (col in 5:20) {
+  dat[, col] = as.numeric(dat[, col])
+}
+```
+
+Add the total enrollments of the school for the first year of the data set (2006) in order to make comparisons.
+
+```{r}
+dat2006 = subset(dat, Year == 2006, select = c("School_ID", "Total"))
+colnames(dat2006)[2] = "Total_2006"
+dat = merge(dat, dat2006)
+```
+
+The total enrollments should match the sum of the enrollments by grade, for each school and year.
+
+```{r}
+plot(rowSums(subset(dat,select=c(PE:G12))), dat$Total)
+max( abs( rowSums(subset(dat,select=c(PE:G12))) - dat$Total))
+```
+
+
+Plot the total enrollments by year of each school. Also plot the ratio of the yearly enrollments and the enrollments in the first year (2006). These are broken up by charter and non-charter schools.
+
+```{r fig.width=8, fig.height=6}
+library(ggplot2)
+ggplot(subset(dat), aes(Year, Total, group = School_ID)) + facet_wrap( ~ School_Type) + geom_line()
+
+ggplot(subset(dat), aes(Year, Total / Total_2006, group = School_ID)) + geom_line(aes(alpha = Total_2006)) + 
+  facet_wrap( ~ School_Type) + scale_y_log10()
+```
+
+Summarize the schools by their average yearly enrollment and the SD of the yearly enrollment. I did this to find a school that consistently has lots of students.
+```{r}
+head(ddply(dat, .(School_ID), summarize, mean = mean(Total), sd = sd(Total)))
+```
+
+For one school (Portage Park), plot some yearly enrollment by grade.
+
+```{r fig.width=8, fig.height=6}
+dat_school = subset(dat, School_ID == 610135, select=c(Year,PK:G08))
+dat_school = dat_school[order(dat_school$Year), ]
+
+library(reshape2)
+school_m = melt(dat_school, id = "Year")
+ggplot(school_m, aes(Year, value, colour = variable)) + geom_line() + facet_wrap( ~ variable)
+ggplot(school_m, aes(Year, variable, fill = cut(value,8))) + geom_tile() + 
+  scale_fill_brewer(type = "div", palette = 1) + labs(title = "Portage Park", y = "Grade", fill = "# Enrolled")
+```
+
+From the tile plot, you can see some trends of high and low enrollments following each year.

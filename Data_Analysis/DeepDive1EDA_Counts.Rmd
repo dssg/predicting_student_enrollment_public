@@ -1,0 +1,200 @@
+---
+title: "First Deep Dive EDA on Enrollment Counts"
+author: "Andrew Landgraf"
+date: "Tuesday, June 24, 2014"
+output: html_document
+---
+
+Load packages. You need to be connected to the CPS VPN. 
+```{r}
+library(lubridate)
+library(ggplot2)
+library(reshape2)
+library(knitr)
+opts_chunk$set(warning = FALSE)
+# setwd("//admin/appdata/DataWarehouse/DSSG/Count Data/")
+```
+
+Read count data from the CPS folder. This data has the number of students enrolled in each school and in each grade on the first day of each month. I also format the data a little.
+```{r}
+counts = read.csv("//admin/appdata/DataWarehouse/DSSG/Count Data/Enrollment_Counts_Month_Current.csv", stringsAsFactors = FALSE)
+counts$Date = as.Date(counts$Date)
+counts$STUDENT_ANNUAL_GRADE_CODE = factor(counts$STUDENT_ANNUAL_GRADE_CODE, 
+                                          c('PE','PK','K','1','2','3','4','5','6','7','8','9','10','11','12'))
+
+counts$Year = as.numeric(substring(counts$SCHOOL_YEAR,6,9))
+counts$Month = month(counts$Date)
+names(counts)[names(counts)=="STUDENT_ANNUAL_GRADE_CODE"] = "Grade"
+```
+
+Read the school report data. This was downloaded from the Chicago data portal. Concentrating on just student performance and overall school rating variables.
+```{r}
+report_elem = read.csv("//admin/appdata/DataWarehouse/DSSG/School Reports/CPS_Elementary_Report_20122013.csv")
+report_high = read.csv("//admin/appdata/DataWarehouse/DSSG/School Reports/CPS_HighSchool_Report_20122013.csv")
+levels(report_elem$Student.Performance.Level) <- 
+  c("Far Below Average", "Below Average", "Average", "Above Average", "Far Above Average")
+report_high$Student.Performance.Level = factor(report_high$Student.Performance.Level,
+                                               c("Far Below Average", "Below Average", "Average", "Above Average", "Far Above Average"))
+report_elem$Overall.Rating = factor(report_elem$Overall.Rating,
+                                    levels = c("Level 1", "Level 2", "Level 3"))
+report_high$Overall.Rating = factor(report_high$Overall.Rating,
+                                    levels = c("Level 1", "Level 2", "Level 3"))
+
+school_reports <- rbind(subset(report_elem, 
+                               select = c(School.ID, Student.Performance.Level, Overall.Rating)),
+                        subset(report_high, 
+                               select = c(School.ID, Student.Performance.Level, Overall.Rating)))
+```
+
+The function below is used for adding grades. You can logically add one grade to `K` and it knows it is `1`.
+```{r}
+advance_grade <- function(current_grade, years = 1) {
+  locs = apply(matrix(current_grade),1,function(x) which(x == levels(counts$Grade))) + years
+  is.na(locs[locs<1 | locs>length(levels(counts$Grade))]) <- TRUE
+  levels(counts$Grade)[locs]
+}
+```
+
+Below, I split the data into five snapshots.The first is enrollments that we want to predict include.
+```{r}
+pred_enrolls = subset(counts, Month == 10, select = c(Year, SCHOOL_KEY, SCHOOL_NAME, SCHOOL_CODE, Grade, Enrollments))
+```
+
+Last year 20th day enrollments.
+```{r}
+prev_20_enrolls = subset(counts, Month == 10, select = c(Year, SCHOOL_KEY, SCHOOL_NAME, SCHOOL_CODE, Grade, Enrollments))
+prev_20_enrolls$Year = prev_20_enrolls$Year + 1
+names(prev_20_enrolls)[names(prev_20_enrolls)=="Enrollments"] <- "Prev_20_Enrollments"
+```
+
+Last year 20th day enrollments for previous grade.
+```{r}
+prev_20_enrolls_grade = prev_20_enrolls
+prev_20_enrolls_grade$Grade = advance_grade(prev_20_enrolls_grade$Grade, 1)
+names(prev_20_enrolls_grade)[names(prev_20_enrolls_grade)=="Prev_20_Enrollments"] <- "Prev_Grade_20_Enrollments"
+```
+
+Last year end of year enrollments.
+```{r}
+prev_end_enrolls = subset(counts, Month == 6, select = c(Year, SCHOOL_KEY, SCHOOL_NAME, SCHOOL_CODE, Grade, Enrollments))
+prev_end_enrolls$Year = prev_end_enrolls$Year + 1
+names(prev_end_enrolls)[names(prev_end_enrolls)=="Enrollments"] <- "Prev_End_Enrollments"
+```
+
+Last year end of year enrollments for previous grade.
+```{r}
+prev_end_enrolls_grade = prev_end_enrolls
+prev_end_enrolls_grade$Grade = advance_grade(prev_end_enrolls_grade$Grade, 1)
+names(prev_end_enrolls_grade)[names(prev_end_enrolls_grade)=="Prev_End_Enrollments"] <- "Prev_Grade_End_Enrollments"
+```
+
+Combine the five snapshots together so that we can use previous snapshots to predict current enrollments.
+```{r}
+enrolls <- merge(pred_enrolls, prev_20_enrolls, all.x=TRUE)
+enrolls <- merge(enrolls, prev_20_enrolls_grade, all.x=TRUE)
+enrolls <- merge(enrolls, prev_end_enrolls, all.x=TRUE)
+enrolls <- merge(enrolls, prev_end_enrolls_grade, all.x=TRUE)
+```
+
+I removed 2009 since there is no prior history and 2014 for testing purposes.
+```{r}
+enrolls_test <- subset(enrolls, Year == 2014)
+enrolls <- subset(enrolls, Year >= 2009 & Year < 2014)
+```
+
+Set NAs to 0 to replicate real life unknowns, except when there is no previous history for school. I am not doing this right now so that we can only assess good data situations.
+```{r}
+# enrolls[is.na(enrolls)] <- 0 
+# enrolls <- merge(enrolls, school_info, all.x=TRUE)
+# set.all.to.na <- which(enrolls$Year == enrolls$Min_Year)
+# set.grade.to.na <- which(enrolls$Grade == enrolls$Min_Grade)
+# is.na(enrolls[set.all.to.na,7:10]) <- TRUE
+# is.na(enrolls[set.grade.to.na,c(8,10)]) <- TRUE
+```
+
+Add in some school information from the school reports.
+```{r}
+enrolls <- merge(enrolls, school_reports, all.x=TRUE, 
+                 by.x = "SCHOOL_CODE", by.y = "School.ID")
+```
+
+Look at how enrollments change throughout the year to see if it is predictive of future enrollment changes. 
+```{r}
+enrolls$Prev_Change = enrolls$Prev_End_Enrollments - enrolls$Prev_20_Enrollments
+enrolls$Prev_Grade_Change = enrolls$Prev_Grade_End_Enrollments - enrolls$Prev_Grade_20_Enrollments
+```
+
+
+Function to calculate correlation of 4 previous year variables with enrollments for a grade.
+```{r}
+compare_cor <- function(grade) {
+  # convert grade to a number with 0=Kindergarten, 1=first grade, etc.
+  c(Grade = which(grade==levels(counts$Grade))-3, cor(subset(enrolls, Grade == grade)[,6:10], use="pair")[-1,1])
+}
+correls = t(sapply(unique(enrolls$Grade), compare_cor))
+correls = as.data.frame(correls)
+correls$Grade = factor(advance_grade("K",correls$Grade), levels = levels(counts$Grade))
+```
+
+Plots for the presentation. Using last year's fifth grade enrollment to estimate this year's fifth grade enrollment. There is a fairly strong correlation year over year. 
+```{r}
+ggplot(subset(enrolls, Grade == "5"), aes(Prev_End_Enrollments, Enrollments)) + 
+  geom_point(alpha = 0.25) + geom_abline() + geom_smooth(method = lm, size = 1) + 
+  labs(x= "Previous Year 5th Grade Enrollments", y= "This Year 5th Grade Enrollments", title = "5th Grade")
+```
+
+In contrast, if we use previous year 4th grade enrollment for the same school, there is a stronger correlation.
+```{r}
+ggplot(subset(enrolls, Grade == "5"), aes(Prev_Grade_End_Enrollments, Enrollments)) + 
+  geom_point(alpha = 0.25) + geom_abline() + geom_smooth(method = lm, size = 1) + 
+  labs(x= "Previous Year 4th Grade Enrollments", y= "This Year 5th Grade Enrollments", title = "5th Grade")
+```
+
+For eleventh grade, we can look at the same two plots. There is no longer a big difference between using eleventh and tenth grade.
+```{r}
+ggplot(subset(enrolls, Grade == "11" & SCHOOL_CODE != "609686"), aes(Prev_End_Enrollments, Enrollments)) + 
+  geom_point(alpha = 0.75) + geom_abline() + geom_smooth(method = lm, size = 1) + 
+  labs(x= "Previous Year 11th Grade Enrollments", y= "This Year 11th Grade Enrollments", title = "11th Grade")
+
+ggplot(subset(enrolls, Grade == "11" & SCHOOL_CODE != "609686"), aes(Prev_Grade_End_Enrollments, Enrollments)) + 
+  geom_point(alpha = 0.75) + geom_abline() + geom_smooth(method = lm, size = 1) + 
+  labs(x= "Previous Year 10th Grade Enrollments", y= "This Year 11th Grade Enrollments", title = "11th Grade")
+```
+
+We can compare the correlations for all grades. Grade school does better than high school for using the same cohort. Also, kindergarten predicts first grade better than first grade, which is contrary to CPS's intuition.
+```{r}
+correls_pres = correls
+names(correls_pres)[4:5] <- c("Same Grade", "Previous Grade")
+is.na(correls_pres[correls_pres$Grade == "9", 5]) <- TRUE
+ggplot(melt(subset(correls_pres[,c(1,4:5)], !(Grade %in% c("PE", "PK"))), id = 1), aes(Grade, value, colour = variable , group = variable)) + 
+  geom_point() + geom_line() + labs(y = "Correlation with Next Year Enrollment", colour = "Method")
+```
+
+We broke up each high school by their rating. The best school are easier to predict because students do not leave.
+```{r}
+ggplot(subset(enrolls, Grade %in% paste(9:12)), aes(Prev_Grade_End_Enrollments, Enrollments)) + 
+  geom_point() + geom_abline() + geom_smooth(method = lm) + facet_grid(Overall.Rating ~ Grade) +
+  labs(x = "Last Year Previous Grade Enrollments", y = "This Year Enrollments")
+```
+
+That is not necessarily the same for elementary school. This may have something to do with students not being old enough able to drop out of school yet.
+```{r}
+ggplot(subset(enrolls, Grade %in% c("K",paste(1:5))), aes(Prev_Grade_End_Enrollments, Enrollments)) + 
+  geom_point(alpha = .5) + geom_abline() + geom_smooth(method = lm, size = 1) + facet_grid(Overall.Rating ~ Grade)+
+  labs(x = "Last Year Previous Grade Enrollments", y = "This Year Enrollments")
+```
+
+
+Other exploratory analysis.
+```{r}
+ggplot(subset(enrolls, Grade != "PE"), aes(Prev_Grade_End_Enrollments, Enrollments)) + 
+  geom_point() + geom_abline() + geom_smooth(method = lm) + facet_wrap(~ Grade, scales="free")
+```
+
+```{r}
+ggplot(subset(enrolls, !(Grade %in% c("PE","PK",paste(9:12)))), aes(Prev_Grade_Change, Enrollments - Prev_Grade_20_Enrollments)) + 
+  geom_point(alpha = .25) + geom_smooth(method = lm) + facet_grid(Overall.Rating ~ Grade)
+
+ggplot(subset(enrolls, Grade %in% paste(9:12)), aes(Prev_Grade_Change, Enrollments - Prev_Grade_20_Enrollments)) + 
+  geom_point(alpha = .25) + geom_smooth(method = lm) + facet_grid(Overall.Rating ~ Grade)
+```
